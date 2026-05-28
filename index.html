@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Go-Back-N ARQ Simulation</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">Go-Back-N ARQ Protocol</div>
+
+      <div class="top-bar">
+        <div class="timer-container">
+          <div class="timer-label">Sender Timer</div>
+          <div class="timer-display" id="timerDisplay">10.0s</div>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar" id="progressBar"></div>
+          </div>
+        </div>
+
+        <div class="window-info">
+          <div class="win-row">
+            <span class="win-label">Window Size (N)</span
+            ><span class="win-val" id="windowSize">3</span>
+          </div>
+          <div class="win-row">
+            <span class="win-label">Send Base</span
+            ><span class="win-val" id="sendBase">0</span>
+          </div>
+          <div class="win-row">
+            <span class="win-label">Next Seq</span
+            ><span class="win-val" id="nextSeq">0</span>
+          </div>
+          <div class="win-row">
+            <span class="win-label">Expected Rcv</span
+            ><span class="win-val" id="rcvExpected">0</span>
+          </div>
+        </div>
+
+        <div class="speed-control">
+          <div class="speed-label">Packet Speed</div>
+          <input
+            type="range"
+            id="speedSlider"
+            min="200"
+            max="3000"
+            step="100"
+            value="1200"
+          />
+          <div class="speed-display" id="speedDisplay">1200ms</div>
+        </div>
+
+        <div class="window-size-control">
+          <label class="win-size-label" for="windowSizeInput"
+            >Window Size (N)</label
+          >
+          <input type="number" id="windowSizeInput" min="1" max="8" value="3" />
+        </div>
+      </div>
+
+      <div class="log-container">
+        <div class="log-title">Protocol Event Log</div>
+        <div class="log-body" id="logBody"></div>
+      </div>
+
+      <div class="main">
+        <div class="lane-label sender-label">SENDER</div>
+        <div class="channel-area" id="channelArea"></div>
+        <div class="lane-label receiver-label">RECEIVER</div>
+
+        <div class="sender array-container"></div>
+        <div class="receiver array-container"></div>
+      </div>
+
+      <div class="buttons-parent">
+        <div class="buttons">
+          <button class="send-pkt-btn" type="button">Send Next Packet</button>
+          <button class="lose-pkt-btn" type="button">
+            Simulate Loss on Next Dispatch
+          </button>
+          <button class="reset" type="button">Reset Simulation</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="script.js"></script>
+  </body>
+</html>
