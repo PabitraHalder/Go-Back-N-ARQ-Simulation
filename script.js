@@ -1,7 +1,3 @@
-// ============================================================
-//  Go-Back-N ARQ — Bounded Sequence Numbers Protocol Engine
-// ============================================================
-
 class ARQTimer {
   constructor(durationInSeconds, displayId, progressBarId, onTimeoutCallback) {
     this.duration = durationInSeconds * 1000;
@@ -14,6 +10,9 @@ class ARQTimer {
   start() {
     this.stop();
     this.remainingTime = this.duration;
+    this._tick();
+  }
+  _tick() {
     this.timerId = setInterval(() => {
       this.remainingTime -= 100;
       if (this.remainingTime <= 0) {
@@ -39,27 +38,27 @@ class ARQTimer {
   }
   updateUI() {
     const s = (this.remainingTime / 1000).toFixed(1);
-    this.displayEl.textContent = `${s}s`;
+    if (this.displayEl) this.displayEl.textContent = `${s}s`;
     const pct = (this.remainingTime / this.duration) * 100;
-    this.progressBarEl.style.width = `${pct}%`;
+    if (this.progressBarEl) this.progressBarEl.style.width = `${pct}%`;
   }
 }
 
-// ── Configuration Variables ─────────────────────────────────
+// ── Configuration ────────────────────────────────────────────
 let WINDOW_SIZE = 3;
-let MAX_SEQ_NUM = WINDOW_SIZE + 1; // Sequence Space size -> WINDOW_SIZE + 1 total values
-const TOTAL_PACKETS = 8; // Grid slots to fill up
-let FLIGHT_DURATION = 1200; // ms — controlled by the speed slider
+let MAX_SEQ_NUM = WINDOW_SIZE + 1; // GBN constraint: seqSpace = windowSize + 1
+const TOTAL_PACKETS = 8;
+let FLIGHT_DURATION = 1200;
 
-// ── Protocol State Tracking Variables ───────────────────────
-// (Stored as raw indices 0..7, but mapped to header values 0..3 using % MAX_SEQ_NUM)
-let sendBase = 0;
-let nextSeq = 0;
-let rcvExpect = 0;
+// ── Protocol State ───────────────────────────────────────────
+let sendBase = 0; // oldest unACKed packet index
+let nextSeq = 0; // next packet index to send (raw, 0..TOTAL_PACKETS)
+let rcvExpect = 0; // receiver's expected raw index
 let forceLossNext = false;
+let forceAckLossNext = false;
 let isRetransmitting = false;
 
-// ── DOM Collections ────────────────────────────────────────
+// ── DOM ──────────────────────────────────────────────────────
 const senderContainer = document.querySelector(".sender");
 const receiverContainer = document.querySelector(".receiver");
 const channelArea = document.getElementById("channelArea");
@@ -71,9 +70,10 @@ const elRcvExpected = document.getElementById("rcvExpected");
 
 const btnSend = document.querySelector(".send-pkt-btn");
 const btnLose = document.querySelector(".lose-pkt-btn");
+const btnLoseAck = document.querySelector(".lose-ack-btn");
 const btnReset = document.querySelector(".reset");
 
-// Create Sliding Windows Elements
+// Sliding window overlay boxes
 const senderWinBox = document.createElement("div");
 senderWinBox.className = "sliding-window sender-window";
 senderContainer.appendChild(senderWinBox);
@@ -85,77 +85,83 @@ receiverContainer.appendChild(receiverWinBox);
 const senderCells = [];
 const receiverCells = [];
 
-// ── Grid Setup Initialization ──────────────────────────────
-for (let i = 0; i < TOTAL_PACKETS; i++) {
-  const sequenceHeaderLabel = i % MAX_SEQ_NUM;
+// ── Grid Initialisation ───────────────────────────────────────
+function buildGrid() {
+  for (let i = 0; i < TOTAL_PACKETS; i++) {
+    const seqLabel = i % MAX_SEQ_NUM;
 
-  const sc = document.createElement("div");
-  sc.className = "array-cell";
-  sc.setAttribute("data-index", i);
-  sc.textContent = `Seq ${sequenceHeaderLabel}`;
-  senderContainer.appendChild(sc);
-  senderCells.push(sc);
+    const sc = document.createElement("div");
+    sc.className = "array-cell";
+    sc.setAttribute("data-index", i);
+    sc.textContent = `Seq ${seqLabel}`;
+    senderContainer.appendChild(sc);
+    senderCells.push(sc);
 
-  const rc = document.createElement("div");
-  rc.className = "array-cell";
-  rc.setAttribute("data-index", i);
-  rc.textContent = `-`;
-  receiverContainer.appendChild(rc);
-  receiverCells.push(rc);
+    const rc = document.createElement("div");
+    rc.className = "array-cell";
+    rc.setAttribute("data-index", i);
+    rc.textContent = `-`;
+    receiverContainer.appendChild(rc);
+    receiverCells.push(rc);
+  }
 }
+buildGrid();
 
+// ── Timer ────────────────────────────────────────────────────
+// Timer fires only for the oldest unACKed frame (sendBase).
+// On timeout → retransmit everything from sendBase..nextSeq-1.
 const senderTimer = new ARQTimer(10, "timerDisplay", "progressBar", () => {
   const baseHeaderSeq = sendBase % MAX_SEQ_NUM;
   log(
-    `TIMEOUT! Frame Header Seq ${baseHeaderSeq} expired. Initiating GBN rollback loop.`,
+    `TIMEOUT! Frame Seq ${baseHeaderSeq} (index ${sendBase}) expired. Initiating GBN rollback.`,
     "timeout",
   );
   handleGoBackNRetransmission();
 });
 
-// ── Sliding Window Position Calculators ────────────────────
+// ── Sliding Window UI ─────────────────────────────────────────
 function updateSlidingWindows() {
-  const baseCell = senderCells[sendBase];
-  if (baseCell && sendBase < TOTAL_PACKETS) {
-    const targetSpan = Math.min(WINDOW_SIZE, TOTAL_PACKETS - sendBase);
-    const lastCellInWin = senderCells[sendBase + targetSpan - 1];
-
-    const topOffset = baseCell.offsetTop;
-    const totalHeight =
-      lastCellInWin.offsetTop + lastCellInWin.offsetHeight - topOffset;
-
-    senderWinBox.style.top = `${topOffset - 4}px`;
-    senderWinBox.style.height = `${totalHeight + 8}px`;
+  // Sender window spans [sendBase .. sendBase+WINDOW_SIZE-1]
+  if (sendBase < TOTAL_PACKETS) {
+    const spanEnd = Math.min(sendBase + WINDOW_SIZE - 1, TOTAL_PACKETS - 1);
+    const topCell = senderCells[sendBase];
+    const botCell = senderCells[spanEnd];
+    const topOff = topCell.offsetTop;
+    const botOff = botCell.offsetTop + botCell.offsetHeight;
+    senderWinBox.style.top = `${topOff - 4}px`;
+    senderWinBox.style.height = `${botOff - topOff + 8}px`;
     senderWinBox.style.display = "block";
   } else {
     senderWinBox.style.display = "none";
   }
 
-  const rcvCell = receiverCells[rcvExpect];
-  if (rcvCell && rcvExpect < TOTAL_PACKETS) {
+  // Receiver window is always a single-cell window at rcvExpect
+  if (rcvExpect < TOTAL_PACKETS) {
+    const rcvCell = receiverCells[rcvExpect];
     receiverWinBox.style.top = `${rcvCell.offsetTop - 4}px`;
     receiverWinBox.style.height = `${rcvCell.offsetHeight + 8}px`;
     receiverWinBox.style.display = "block";
-
     receiverCells.forEach((c, idx) => {
-      if (idx === rcvExpect) c.classList.add("expected");
-      else c.classList.remove("expected");
+      c.classList.toggle("expected", idx === rcvExpect);
     });
   } else {
     receiverWinBox.style.display = "none";
+    receiverCells.forEach((c) => c.classList.remove("expected"));
   }
 
+  // Update stat displays (show header seq values, not raw indices)
   elSendBase.textContent = sendBase % MAX_SEQ_NUM;
   elNextSeq.textContent = nextSeq % MAX_SEQ_NUM;
   elRcvExpected.textContent = rcvExpect % MAX_SEQ_NUM;
 
+  // Send button is disabled when window is full, all packets sent, or mid-retransmit
   btnSend.disabled =
     nextSeq >= sendBase + WINDOW_SIZE ||
     nextSeq >= TOTAL_PACKETS ||
     isRetransmitting;
 }
 
-// ── Protocol Core Functions ────────────────────────────────
+// ── Logging ───────────────────────────────────────────────────
 function log(msg, type = "info") {
   const entry = document.createElement("div");
   entry.className = `log-entry ${type}`;
@@ -163,6 +169,7 @@ function log(msg, type = "info") {
   logBody.prepend(entry);
 }
 
+// ── Animation Helpers ─────────────────────────────────────────
 function getRowY(index) {
   const cellRect = senderCells[index].getBoundingClientRect();
   const chRect = channelArea.getBoundingClientRect();
@@ -180,10 +187,12 @@ function animateFlight(label, fromRight, targetY, isLost = false) {
     pkt.style.left = fromRight ? `${areaWidth}px` : `-80px`;
     channelArea.appendChild(pkt);
 
-    void pkt.offsetWidth;
+    void pkt.offsetWidth; // force reflow
+
     pkt.style.transition = `left ${FLIGHT_DURATION}ms linear, opacity 300ms ease`;
 
     if (isLost) {
+      // Travel to midpoint then fade out
       setTimeout(() => {
         pkt.style.left = `${areaWidth / 2 - 30}px`;
         setTimeout(() => {
@@ -204,32 +213,50 @@ function animateFlight(label, fromRight, targetY, isLost = false) {
   });
 }
 
-// ── Send and Receive Protocol Engine ─────────────────────────
-async function sendPacket(packetIndex) {
+// ── Core: Send a Single Packet ────────────────────────────────
+// FIXED:
+//  • nextSeq only incremented when sending a genuinely new frame (not during retransmit)
+//  • cumulative ACK matching uses a clear loop over [sendBase..nextSeq)
+//  • timer only restarted when sendBase actually advances
+//  • duplicate frame (scenario B) always re-ACKs without touching nextSeq/rcvExpect
+async function sendPacket(packetIndex, isRetransmit = false) {
   if (packetIndex >= TOTAL_PACKETS) return;
 
   const headerSeqNo = packetIndex % MAX_SEQ_NUM;
 
-  const currentLossTarget = forceLossNext;
+  // ── Consume loss flags (only on the first packet sent, not re-acks) ──
+  const currentLossTarget = !isRetransmit && forceLossNext;
   if (currentLossTarget) {
     forceLossNext = false;
     btnLose.classList.remove("reset");
     btnLose.textContent = "Simulate Loss on Next Dispatch";
   }
 
+  const currentAckLossTarget = !isRetransmit && forceAckLossNext;
+  if (currentAckLossTarget) {
+    forceAckLossNext = false;
+    btnLoseAck.classList.remove("reset");
+    btnLoseAck.textContent = "Simulate ACK Loss on Next Dispatch";
+  }
+
   log(
-    `[Tx] Dispatching Packet. Packet Index: ${packetIndex} -> Header Seq: ${headerSeqNo}`,
+    `[Tx] ${isRetransmit ? "Re-sending" : "Sending"} packet index ${packetIndex} → Header Seq ${headerSeqNo}`,
     "info",
   );
   senderCells[packetIndex].className = "array-cell sent";
 
-  if (sendBase === packetIndex) {
+  // Start the timer when we send the base frame (oldest unACKed)
+  if (packetIndex === sendBase && !senderTimer.timerId) {
     senderTimer.start();
   }
 
-  if (packetIndex === nextSeq) nextSeq++;
+  // Only advance nextSeq for genuinely new transmissions
+  if (!isRetransmit && packetIndex === nextSeq) {
+    nextSeq++;
+  }
   updateSlidingWindows();
 
+  // ── Forward channel ──
   const result = await animateFlight(
     `Seq ${headerSeqNo}`,
     false,
@@ -238,152 +265,214 @@ async function sendPacket(packetIndex) {
   );
 
   if (!result.delivered) {
-    log(`[Loss] Packet with Header Seq ${headerSeqNo} dropped!`, "error");
+    log(
+      `[Loss] Forward packet Seq ${headerSeqNo} dropped in channel.`,
+      "error",
+    );
     return;
   }
 
-  // ── Receiver-Side Tracking Engine ──
+  // ── Receiver logic ──
   const expectedHeaderSeq = rcvExpect % MAX_SEQ_NUM;
 
-  if (headerSeqNo === expectedHeaderSeq) {
+  if (headerSeqNo === expectedHeaderSeq && packetIndex === rcvExpect) {
+    // ── SCENARIO A: Expected in-order frame ──
     log(
-      `[Rx] In-order match! Expected Header Seq ${expectedHeaderSeq} matches received Seq ${headerSeqNo}.`,
+      `[Rx] In-order! Seq ${headerSeqNo} accepted. (index ${packetIndex})`,
       "success",
     );
     receiverCells[rcvExpect].className = "array-cell received";
-    receiverCells[rcvExpect].textContent = `Seq ${headerSeqNo} (OK)`;
-
+    receiverCells[rcvExpect].textContent = `Seq ${headerSeqNo} ✓`;
     rcvExpect++;
     updateSlidingWindows();
 
-    const nextExpectedHeaderAck = rcvExpect % MAX_SEQ_NUM;
-    log(
-      `[Rx] Generating Cumulative Acknowledgement: ACK ${nextExpectedHeaderAck}`,
-      "info",
-    );
+    const ackVal = rcvExpect % MAX_SEQ_NUM;
+    log(`[Rx] Sending cumulative ACK ${ackVal}`, "info");
+
     const ackResult = await animateFlight(
-      `ACK ${nextExpectedHeaderAck}`,
+      `ACK ${ackVal}`,
       true,
       getRowY(packetIndex),
+      currentAckLossTarget,
     );
 
-    // ── Sender Processing the ACK ──
     if (ackResult.delivered) {
-      let matchIndex = -1;
-      for (let i = sendBase; i < nextSeq; i++) {
-        if ((i + 1) % MAX_SEQ_NUM === nextExpectedHeaderAck) {
-          matchIndex = i + 1;
-        }
-      }
+      processAck(rcvExpect); // pass raw expected index so matching is unambiguous
+    } else {
+      log(`[Loss] ACK ${ackVal} dropped in channel!`, "error");
+      // GBN: sender will timeout and retransmit — no action needed at receiver
+    }
+  } else if (packetIndex < rcvExpect) {
+    // ── SCENARIO B: Duplicate (already received, ACK was lost) ──
+    log(
+      `[Rx] Duplicate frame Seq ${headerSeqNo} (index ${packetIndex}). Discarding data, re-ACKing.`,
+      "timeout",
+    );
 
-      if (matchIndex > sendBase) {
-        log(
-          `[Tx] Cumulative ACK ${nextExpectedHeaderAck} received. Acknowledging indices up to ${matchIndex - 1}`,
-          "success",
-        );
-        for (let i = sendBase; i < matchIndex; i++) {
-          senderCells[i].className = "array-cell acked";
-        }
-        sendBase = matchIndex;
+    const ackVal = rcvExpect % MAX_SEQ_NUM;
+    log(`[Rx] Re-sending cumulative ACK ${ackVal}`, "info");
 
-        if (sendBase === nextSeq) {
-          senderTimer.stop();
-          log("Pipeline clear. Stopping tracking timer.", "success");
-        } else {
-          senderTimer.start();
-        }
-        updateSlidingWindows();
-        checkCompletion();
-      }
+    const ackResult = await animateFlight(
+      `ACK ${ackVal}`,
+      true,
+      getRowY(packetIndex),
+      false, // re-ACKs never get dropped
+    );
+
+    if (ackResult.delivered) {
+      processAck(rcvExpect);
     }
   } else {
+    // ── SCENARIO C: Out-of-order frame (GBN: discard, NAK with current ACK) ──
     log(
-      `[Rx] Out-of-order Packet discarded! Received Seq ${headerSeqNo} but expected Seq ${expectedHeaderSeq}.`,
+      `[Rx] Out-of-order! Got Seq ${headerSeqNo} but expected Seq ${expectedHeaderSeq}. Discarding.`,
       "error",
     );
-
-    const currentHeaderAckRequest = rcvExpect % MAX_SEQ_NUM;
-    log(
-      `[Rx] Re-sending current Cumulative state: ACK ${currentHeaderAckRequest}`,
-      "info",
-    );
-    await animateFlight(
-      `ACK ${currentHeaderAckRequest}`,
-      true,
-      getRowY(packetIndex),
-    );
+    const ackVal = rcvExpect % MAX_SEQ_NUM;
+    log(`[Rx] Re-sending current ACK ${ackVal}`, "info");
+    await animateFlight(`ACK ${ackVal}`, true, getRowY(packetIndex), false);
+    // Sender ignores duplicate/old ACKs — only a timeout triggers GBN rollback
   }
 }
 
-// ── Go-Back-N Retransmission Pipeline Loop ───────────────────
+// ── Cumulative ACK Processing ─────────────────────────────────
+// FIXED: accepts rawExpect (the raw rcvExpect value) instead of a header seq number,
+//        so mapping from ACK value → sendBase advance is exact and unambiguous.
+//
+// rawExpect = rcvExpect at the moment the receiver sent the ACK.
+// All indices in [sendBase .. rawExpect-1] are now cumulatively acknowledged.
+function processAck(rawExpect) {
+  if (rawExpect <= sendBase) return; // stale or duplicate ACK — ignore
+
+  const headerAck = rawExpect % MAX_SEQ_NUM;
+  log(
+    `[Tx] Cumulative ACK ${headerAck} received. Sliding window from index ${sendBase} → ${rawExpect}.`,
+    "success",
+  );
+
+  for (let i = sendBase; i < rawExpect; i++) {
+    senderCells[i].className = "array-cell acked";
+  }
+  sendBase = rawExpect;
+
+  if (sendBase >= nextSeq) {
+    // All outstanding frames acknowledged — stop timer
+    senderTimer.stop();
+    log("Pipeline clear. Timer stopped.", "success");
+  } else {
+    // Still have unACKed frames — restart timer for the new base
+    senderTimer.start();
+    log(
+      `[Tx] Timer restarted for Seq ${sendBase % MAX_SEQ_NUM} (index ${sendBase}).`,
+      "info",
+    );
+  }
+
+  updateSlidingWindows();
+  checkCompletion();
+}
+
+// ── Go-Back-N Retransmission ──────────────────────────────────
 async function handleGoBackNRetransmission() {
+  if (isRetransmitting) return; // guard against re-entrant timeout
   isRetransmitting = true;
-  btnSend.disabled = true;
+  updateSlidingWindows(); // disables send button
+
+  const retransmitFrom = sendBase;
+  const retransmitTo = nextSeq; // exclusive upper bound — frozen here
 
   log(
-    `[Retransmit] Pipeline fallback activated. Rolling execution pointer back to index base: ${sendBase}`,
+    `[Retransmit] GBN rollback: re-sending indices ${retransmitFrom}..${retransmitTo - 1}`,
     "timeout",
   );
 
-  for (let i = sendBase; i < nextSeq; i++) {
+  // Reset cell style to "sent" (unsettled)
+  for (let i = retransmitFrom; i < retransmitTo; i++) {
     senderCells[i].className = "array-cell sent";
   }
 
-  const packetsToResend = [];
-  for (let i = sendBase; i < nextSeq; i++) {
-    packetsToResend.push(i);
-  }
+  // Stop the old timer; sendPacket will restart it when it sends the base frame
+  senderTimer.stop();
 
-  for (const index of packetsToResend) {
-    await sendPacket(index);
+  for (let i = retransmitFrom; i < retransmitTo; i++) {
+    // If a previous frame in this loop already moved sendBase past i (via ACK),
+    // skip frames that are already acknowledged
+    if (i < sendBase) continue;
+    await sendPacket(i, true /*isRetransmit*/);
   }
 
   isRetransmitting = false;
   updateSlidingWindows();
 }
 
+// ── Completion Check ──────────────────────────────────────────
 function checkCompletion() {
   if (sendBase >= TOTAL_PACKETS) {
-    log(
-      "SUCCESS! All Sequence allocations completed and acknowledged successfully.",
-      "success",
-    );
+    log("✓ All packets transmitted and acknowledged successfully!", "success");
     senderTimer.stop();
     btnSend.disabled = true;
     btnLose.disabled = true;
+    btnLoseAck.disabled = true;
   }
 }
 
-// ── Control Event Listeners ─────────────────────────────────
+// ── Button: Send ──────────────────────────────────────────────
 btnSend.addEventListener("click", () => {
-  if (nextSeq < sendBase + WINDOW_SIZE && nextSeq < TOTAL_PACKETS) {
-    sendPacket(nextSeq);
+  if (
+    !isRetransmitting &&
+    nextSeq < sendBase + WINDOW_SIZE &&
+    nextSeq < TOTAL_PACKETS
+  ) {
+    sendPacket(nextSeq, false);
   }
 });
 
+// ── Button: Simulate packet loss ─────────────────────────────
 btnLose.addEventListener("click", () => {
   forceLossNext = !forceLossNext;
+  forceAckLossNext = false;
+  btnLoseAck.classList.remove("reset");
+  btnLoseAck.textContent = "Simulate ACK Loss on Next Dispatch";
+
   if (forceLossNext) {
     btnLose.classList.add("reset");
-    btnLose.textContent = "Loss Simulation Active!";
-    log("Next packet sent will trigger a simulated loss drop.", "timeout");
+    btnLose.textContent = "Packet Loss Active";
+    log("Next forward packet will be dropped.", "timeout");
   } else {
     btnLose.classList.remove("reset");
-    btnLose.textContent = "Simulate Loss on Next Dispatch";
+    btnLose.textContent = "Simulate PKT Loss on Next Dispatch";
   }
 });
 
+// ── Button: Simulate ACK loss ─────────────────────────────────
+btnLoseAck.addEventListener("click", () => {
+  forceAckLossNext = !forceAckLossNext;
+  forceLossNext = false;
+  btnLose.classList.remove("reset");
+  btnLose.textContent = "Simulate PKT Loss on Next Dispatch";
+
+  if (forceAckLossNext) {
+    btnLoseAck.classList.add("reset");
+    btnLoseAck.textContent = "ACK Loss Active";
+    log("The ACK for the next packet will be dropped.", "timeout");
+  } else {
+    btnLoseAck.classList.remove("reset");
+    btnLoseAck.textContent = "Simulate ACK Loss on Next Dispatch";
+  }
+});
+
+// ── Button: Reset ─────────────────────────────────────────────
 btnReset.addEventListener("click", () => resetSimulation());
 
-// ── Speed Slider Event Listener ─────────────────────────────
+// ── Speed Slider ──────────────────────────────────────────────
 document.getElementById("speedSlider").addEventListener("input", (e) => {
   FLIGHT_DURATION = Number(e.target.value);
   document.getElementById("speedDisplay").textContent = `${FLIGHT_DURATION}ms`;
 });
 
-// ── Window Size Input Event Listener ────────────────────────
+// ── Window Size Input ─────────────────────────────────────────
 document.getElementById("windowSizeInput").addEventListener("change", (e) => {
-  const val = Math.max(1, Math.min(8, Number(e.target.value)));
+  const val = Math.max(1, Math.min(7, Number(e.target.value))); // max 7: seqSpace=8 for 8 packets
   e.target.value = val;
   if (val === WINDOW_SIZE) return;
 
@@ -392,33 +481,36 @@ document.getElementById("windowSizeInput").addEventListener("change", (e) => {
   document.getElementById("windowSize").textContent = WINDOW_SIZE;
 
   log(
-    `Window size changed to ${WINDOW_SIZE}. Seq space: 0–${MAX_SEQ_NUM - 1}. Resetting simulation.`,
+    `Window size → ${WINDOW_SIZE}. Sequence space: 0–${MAX_SEQ_NUM - 1}. Resetting.`,
     "timeout",
   );
   resetSimulation();
 });
 
-// ── Full In-Place Reset ──────────────────────────────────────
+// ── Full Reset ────────────────────────────────────────────────
 function resetSimulation() {
-  // Stop any running timer
   senderTimer.stop();
   senderTimer.reset();
 
-  // Reset protocol state
   sendBase = 0;
   nextSeq = 0;
   rcvExpect = 0;
   forceLossNext = false;
+  forceAckLossNext = false;
   isRetransmitting = false;
 
+  btnSend.disabled = false;
   btnLose.disabled = false;
+  btnLoseAck.disabled = false;
   btnLose.classList.remove("reset");
-  btnLose.textContent = "Simulate Loss on Next Dispatch";
+  btnLose.textContent = "Simulate PKT Loss on Next Dispatch";
+  btnLoseAck.classList.remove("reset");
+  btnLoseAck.textContent = "Simulate ACK Loss on Next Dispatch";
 
-  // Clear all flying packets from channel
+  // Clear in-flight animations
   channelArea.querySelectorAll(".flying-packet").forEach((p) => p.remove());
 
-  // Rebuild sender and receiver grid cells
+  // Rebuild grid cells
   senderCells.forEach((c) => c.remove());
   receiverCells.forEach((c) => c.remove());
   senderCells.length = 0;
@@ -444,14 +536,14 @@ function resetSimulation() {
 
   setTimeout(() => updateSlidingWindows(), 50);
   log(
-    `Simulation reset. Window size = ${WINDOW_SIZE}. Seq space = ${MAX_SEQ_NUM} [0–${MAX_SEQ_NUM - 1}].`,
+    `Reset. Window = ${WINDOW_SIZE}. Seq space = [0–${MAX_SEQ_NUM - 1}].`,
     "success",
   );
 }
 
-// ── Initial render configuration call ───────────────────────
+// ── Initial render ────────────────────────────────────────────
 setTimeout(() => updateSlidingWindows(), 150);
 log(
-  `System initialized with Sequence Size space = ${MAX_SEQ_NUM} [0-${MAX_SEQ_NUM - 1}].`,
+  `GBN ARQ initialised. Seq space = [0–${MAX_SEQ_NUM - 1}]. Window = ${WINDOW_SIZE}.`,
   "success",
 );
